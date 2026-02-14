@@ -7,7 +7,6 @@ import { useMutation, useQuery } from "@tanstack/react-query"
 import { format } from "date-fns"
 import { useParams, useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
-import { ms } from "zod/locales"
 
 function formatTimeRemaining(seconds: number) {
     const mins = Math.floor(seconds / 60)
@@ -22,10 +21,40 @@ const Page = () => {
 
     const { username } = useUsername()
     const [input, setInput] = useState("")
-        const inputRef = useRef<HTMLInputElement>(null)
+    const inputRef = useRef<HTMLInputElement>(null)
+    const [joined, setJoined] = useState(false)
 
     const [copyStatus, setCopyStatus] = useState("COPY")
-    const [timeRemaining, setTimeRemaining] = useState<number | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+
+        const joinRoom = async () => {
+            const res = await client.room.join.post(null, {
+                query: { roomId },
+            })
+
+            if (cancelled) return
+
+            if (res.status === 409) {
+                router.push("/?error=room-full")
+                return
+            }
+
+            if (res.status !== 200) {
+                router.push("/?error=room-not-found")
+                return
+            }
+
+            setJoined(true)
+        }
+
+        joinRoom()
+
+        return () => {
+            cancelled = true
+        }
+    }, [roomId, router])
 
     const { data: ttlData } = useQuery({
         queryKey: ["ttl", roomId],
@@ -34,33 +63,16 @@ const Page = () => {
                 query: { roomId }
             })
             return res.data
-        }
+        },
+        enabled: joined,
+        refetchInterval: 1000,
     })
 
     useEffect(() => {
-        if (ttlData?.ttl !== undefined) setTimeRemaining(ttlData.ttl)
-    }, [ttlData])
-
-    useEffect(() => {
-        if (timeRemaining === null || timeRemaining < 0) return
-
-        if (timeRemaining === 0) {
+        if (ttlData?.ttl === 0) {
             router.push("/?destroyed=true")
-            return
         }
-
-        const interval = setInterval(() => {
-            setTimeRemaining((prev) => {
-                if (prev === null || prev <= 1) {
-                    clearInterval(interval)
-                    return 0
-                }
-                return prev - 1
-            })
-        }, 1000)
-
-        return () => clearInterval(interval)
-    }, [timeRemaining, router])
+    }, [ttlData?.ttl, router])
 
     const { data: messages, refetch } = useQuery({
         queryKey: ["messages", roomId],
@@ -68,10 +80,12 @@ const Page = () => {
             const res = await client.messages.get({ query: { roomId } })
             return res.data
         },
+        enabled: joined,
     })
 
     const {mutate: sendMessage, isPending } = useMutation({
         mutationFn: async ({ text }: { text: string }) => {
+            if (!joined) return
             await client.messages.post({ sender: username, text }, { query: { roomId } })
 
             setInput("")
@@ -79,9 +93,10 @@ const Page = () => {
     })
 
     useRealtime({
-        channels: [roomId],
+        channels: joined ? [roomId] : [],
         events: ["chat.message", "chat.destroy"],
         onData: ({event}) => {
+            if (!joined) return
             if (event === "chat.message") {
                 refetch()
             }
@@ -92,8 +107,9 @@ const Page = () => {
         },
     })
 
-    const { mutate: destroyRoom } = useMutation({
+    const { mutate: destroyRoom, isPending: isDestroying } = useMutation({
         mutationFn: async () => {
+            if (!joined) return
             await client.room.delete(null, { query: { roomId }})
         },
     })
@@ -124,11 +140,11 @@ const Page = () => {
 
                 <div className="flex flex-col">
                     <span className="text-xs text-zinc-500 uppercase">Self-Destruct</span>
-                    <span className={`text-sm font-bold flex items-center gap-2 ${timeRemaining !== null && timeRemaining < 60 ? "text-red-500" : "text-amber-500"}`}>{timeRemaining !== null ? formatTimeRemaining(timeRemaining) : "--:--"}</span>
+                    <span className={`text-sm font-bold flex items-center gap-2 ${ttlData?.ttl !== undefined && ttlData.ttl < 60 ? "text-red-500" : "text-amber-500"}`}>{ttlData?.ttl !== undefined ? formatTimeRemaining(ttlData.ttl) : "--:--"}</span>
                 </div>
             </div>
 
-            <button onClick={() => destroyRoom()} className="text-xs bg-zinc-800 hover:bg-red-600 px-3 py-1.5 rounded text-zinc-400 hover:text-white font-bold transition-all group flex items-center gap-2 disabled:opacity-50">
+            <button onClick={() => destroyRoom()} disabled={!joined || isDestroying} className="text-xs bg-zinc-800 hover:bg-red-600 px-3 py-1.5 rounded text-zinc-400 hover:text-white font-bold transition-all group flex items-center gap-2 disabled:opacity-50">
                 <span className="group-hover:animate-pulse">💣</span>
                 DESTROY NOW
             </button>
@@ -181,7 +197,7 @@ const Page = () => {
                     sendMessage({ text: input })
                     inputRef.current?.focus()
                 }}
-                disabled={!input.trim() || isPending}
+                disabled={!joined || !input.trim() || isPending}
                 className="bg-zinc-800 text-zinc-400 px-6 text-sm font-bold hover:text-zinc-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">SEND</button>
             </div>
         </div>

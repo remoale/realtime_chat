@@ -1,5 +1,5 @@
 import { redis } from '@/lib/redis'
-import { Elysia, t } from 'elysia'
+import { Elysia } from 'elysia'
 import { nanoid } from 'nanoid'
 import { authMiddleware } from './auth'
 import { z } from "zod"
@@ -20,6 +20,42 @@ const rooms = new Elysia({ prefix: "/room" })
 
         return { roomId }
     })
+    .post("/join", async ({ query, cookie, set }) => {
+        const { roomId } = query
+        const meta = await redis.hgetall<{ connected: string[] }>(`meta:${roomId}`)
+
+        if (!meta) {
+            set.status = 404
+            return { error: "Room not found" }
+        }
+
+        const connected = meta.connected ?? []
+        const existingToken = cookie["x-auth-token"]?.value as string | undefined
+
+        if (existingToken && connected.includes(existingToken)) {
+            return { ok: true }
+        }
+
+        if (connected.length >= 2) {
+            set.status = 409
+            return { error: "Room full" }
+        }
+
+        const token = nanoid()
+        await redis.hset(`meta:${roomId}`, {
+            connected: [...connected, token],
+        })
+
+        cookie["x-auth-token"].set({
+            value: token,
+            path: "/",
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict",
+        })
+
+        return { ok: true }
+    }, { query: z.object({ roomId: z.string() }) })
     .use(authMiddleware)
     .get("/ttl", async ({ auth }) => {
         const ttl = await redis.ttl(`meta:${auth.roomId}`)
